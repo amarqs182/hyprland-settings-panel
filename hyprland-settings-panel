@@ -64,6 +64,17 @@ def parse_colors_toml(path):
         print(f"Error parsing colors.toml: {e}")
     return colors
 
+def get_hyprland_version():
+    try:
+        result = subprocess.run(['hyprctl', 'version', '-j'], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            tag = data.get('tag', 'unknown')
+            return tag.lstrip('v')
+    except:
+        pass
+    return 'unknown'
+
 def get_theme_styles():
     theme_name = "catppuccin"
     try:
@@ -751,7 +762,7 @@ input[type="color"] {
   <div class="sidebar-header">
     <div class="logo">H</div>
     <div class="title">Hyprland</div>
-    <div class="version">0.54</div>
+    <div class="version" id="hypr-version">...</div>
   </div>
   
   <div style="padding: 10px 16px; border-bottom: 1px solid var(--border);">
@@ -820,6 +831,9 @@ input[type="color"] {
     </div>
     <div class="sidebar-item" onclick="showSection('ecosystem')">
       <span class="icon">🌐</span> Ecosystem
+    </div>
+    <div class="sidebar-item" onclick="showSection('debug')">
+      <span class="icon">🪲</span> Debug
     </div>
   </div>
   
@@ -899,6 +913,7 @@ function showSection(name) {
     case 'binds': renderBinds(main); break;
     case 'xwayland': renderXWayland(main); break;
     case 'ecosystem': renderEcosystem(main); break;
+    case 'debug': renderDebug(main); break;
     case 'presets': renderPresets(main); break;
     case 'locale': renderLocale(main); break;
   }
@@ -1118,7 +1133,6 @@ async function renderDecoration(el) {
     makeSlider('decoration:shadow:range', 'Shadow Range', 0, 100, 1, 'Shadow spread'),
     makeSlider('decoration:shadow:render_power', 'Shadow Power', 1, 10, 1, 'Shadow darkness'),
     makeText('decoration:shadow:color', 'Shadow Color', 'Shadow color'),
-    makeToggle('decoration:shadow:ignore_window', 'Shadow Ignore Window', 'Shadow ignores window'),
     makeToggle('decoration:blur:enabled', 'Blur', 'Enable blur effect'),
     makeSlider('decoration:blur:size', 'Blur Size', 0, 20, 1, 'Blur kernel size'),
     makeSlider('decoration:blur:passes', 'Blur Passes', 0, 10, 1, 'Number of blur passes'),
@@ -1296,6 +1310,8 @@ async function renderCursor(el) {
     makeToggle('cursor:sync_gsettings_theme', 'Sync GSettings', 'Sync with GTK theme'),
     makeSlider('cursor:hotspot_padding', 'Hotspot Padding', 0, 20, 1, 'Cursor hotspot padding'),
     makeSlider('cursor:inactive_timeout', 'Inactive Timeout', 0, 30, 1, 'Hide after seconds (0=off)'),
+    makeSlider('cursor:zoom_factor', 'Zoom Factor', 1, 10, 0.5, 'Cursor zoom factor (1=no zoom)'),
+    makeToggle('cursor:zoom_rigid', 'Zoom Rigid', 'Use rigid zoom (no smooth)'),
   ]);
 }
 
@@ -1304,7 +1320,6 @@ async function renderMisc(el) {
     makeToggle('misc:disable_hyprland_logo', 'Disable Logo'),
     makeToggle('misc:disable_splash_rendering', 'Disable Splash'),
     makeToggle('misc:force_default_wallpaper', 'Force Default Wallpaper'),
-    makeToggle('misc:vfr', 'VFR', 'Variable Frame Rate'),
     makeSlider('misc:vrr', 'VRR', 0, 2, 1, '0=off, 1=on, 2=fullscreen only'),
     makeToggle('misc:mouse_move_enables_dpms', 'Mouse enables DPMS'),
     makeToggle('misc:key_press_enables_dpms', 'Key enables DPMS'),
@@ -1354,6 +1369,16 @@ async function renderEcosystem(el) {
     makeToggle('ecosystem:no_update_news', 'No Update News'),
     makeToggle('ecosystem:no_donation_nag', 'No Donation Nag'),
     makeToggle('ecosystem:enforce_permissions', 'Enforce Permissions'),
+  ]);
+}
+
+async function renderDebug(el) {
+  await renderSection(el, 'Debug', '🪲', 'Debug and development settings', [
+    makeToggle('debug:suppress_errors', 'Suppress Errors', 'Suppress error popups'),
+    makeToggle('debug:disable_scale_checks', 'Disable Scale Checks', 'Disable DPI scale checks'),
+    makeSlider('debug:error_limit', 'Error Limit', 0, 100, 1, 'Max errors before aborting'),
+    makeToggle('debug:damage_blink', 'Damage Blink', 'Flash damaged regions (debug)'),
+    makeToggle('debug:vfr', 'VFR', 'Variable Frame Rate (moved from misc)'),
   ]);
 }
 
@@ -1590,6 +1615,20 @@ async function setSystemLocale() {
 
 // Load general on start
 showSection('general');
+
+// Load Hyprland version
+(async () => {
+  try {
+    const res = await fetch('/api', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'get_version'})
+    });
+    const data = await res.json();
+    const el = document.getElementById('hypr-version');
+    if (el && data.value) el.textContent = 'v' + data.value;
+  } catch(e) {}
+})();
 </script>
 </body>
 </html>
@@ -1649,6 +1688,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             
             if action == 'get':
                 result = get_option(opt)
+            elif action == 'get_version':
+                result = {"value": get_hyprland_version()}
             elif action == 'set':
                 set_option(opt, value)
                 result = {"ok": True}

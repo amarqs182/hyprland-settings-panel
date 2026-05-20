@@ -832,6 +832,110 @@ input[type="color"] {
   transform: translateY(0);
   opacity: 1;
 }
+/* Migration UI */
+.file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-size: 12px;
+  transition: all var(--transition);
+}
+
+.file-item:hover {
+  border-color: var(--border2);
+}
+
+.file-item .icon {
+  font-size: 16px;
+  color: var(--accent);
+}
+
+.file-item .name {
+  flex: 1;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.file-item .path {
+  font-size: 10px;
+  color: var(--fg3);
+  font-family: inherit;
+}
+
+.file-item .status {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.file-item .status.pending {
+  background: var(--bg4);
+  color: var(--fg3);
+}
+
+.file-item .status.ready {
+  background: var(--accent3);
+  color: var(--accent);
+}
+
+.file-item .status.done {
+  background: rgba(74, 222, 128, 0.15);
+  color: var(--success);
+}
+
+.file-item .status.error {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--danger);
+}
+
+.preview-box {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin: 16px 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--fg2);
+  max-height: 400px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.preview-box .comment { color: var(--fg3); }
+.preview-box .keyword { color: var(--accent); }
+.preview-box .string { color: var(--success); }
+.preview-box .number { color: #60a5fa; }
+
+.btn-group {
+  display: flex;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.badge-count {
+  background: var(--accent3);
+  color: var(--accent);
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  margin-left: 4px;
+}
 </style>
 </head>
 <body>
@@ -913,6 +1017,9 @@ input[type="color"] {
     <div class="sidebar-item" onclick="showSection('debug')">
       <span class="icon">🪲</span> Debug
     </div>
+    <div class="sidebar-item" onclick="showSection('migration')">
+      <span class="icon">🔄</span> Migration
+    </div>
   </div>
   
   <div class="sidebar-group">
@@ -992,6 +1099,7 @@ function showSection(name) {
     case 'xwayland': renderXWayland(main); break;
     case 'ecosystem': renderEcosystem(main); break;
     case 'debug': renderDebug(main); break;
+    case 'migration': renderMigration(main); break;
     case 'presets': renderPresets(main); break;
     case 'locale': renderLocale(main); break;
   }
@@ -1460,6 +1568,170 @@ async function renderDebug(el) {
   ]);
 }
 
+async function renderMigration(el) {
+  el.innerHTML = `
+    ${makeHeader('Migration', '🔄', 'Convert hyprlang configs to Lua (Hyprland 0.55+)')}
+    <div class="info-bar">
+      <span class="icon">ℹ</span>
+      Scan your ~/.config/hypr/ directory for .conf files and convert them to Lua format.
+      Requires Hyprland 0.55+. Original .conf files are preserved.
+    </div>
+    <div class="btn-group">
+      <button class="btn btn-accent" onclick="migrationScan()">🔍 Scan Configs</button>
+      <button class="btn" onclick="migrationLoadExample()">📄 Load Example</button>
+    </div>
+    <div id="migration-content"></div>
+  `;
+}
+
+let migrationFiles = [];
+
+async function migrationScan() {
+  const content = document.getElementById('migration-content');
+  content.innerHTML = '<div class="info-bar"><span class="icon">⏳</span> Scanning...</div>';
+  
+  try {
+    const res = await fetch('/api/system', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'scan_configs'})
+    });
+    const data = await res.json();
+    
+    if (!data.files || data.files.length === 0) {
+      content.innerHTML = `
+        <div class="info-bar">
+          <span class="icon">📭</span>
+          No .conf files found in ~/.config/hypr/
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-accent" onclick="migrationLoadExample()">📄 Load Official Example</button>
+        </div>
+      `;
+      return;
+    }
+    
+    migrationFiles = data.files;
+    content.innerHTML = `
+      <div class="info-bar">
+        <span class="icon">📁</span>
+        Found <strong>${data.files.length}</strong> config files
+      </div>
+      <div class="file-list">
+        ${data.files.map(f => `
+          <div class="file-item">
+            <span class="icon">${f.has_lua ? '✅' : '📄'}</span>
+            <div>
+              <div class="name">${f.name}</div>
+              <div class="path">${f.path}</div>
+            </div>
+            <span class="status ${f.has_lua ? 'done' : 'ready'}">${f.has_lua ? 'Lua exists' : 'Ready'}</span>
+          </div>
+        `).join('')}
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-accent" onclick="migrationConvertAll()">🔄 Convert All</button>
+        <button class="btn" onclick="migrationConvertAll(true)">👁 Preview All</button>
+      </div>
+      <div id="migration-preview"></div>
+    `;
+  } catch(e) {
+    content.innerHTML = `<div class="info-bar"><span class="icon">❌</span> Error: ${e.message}</div>`;
+  }
+}
+
+async function migrationConvertAll(preview = false) {
+  const previewEl = document.getElementById('migration-preview');
+  previewEl.innerHTML = '<div class="info-bar"><span class="icon">⏳</span> Converting...</div>';
+  
+  try {
+    const res = await fetch('/api/system', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'convert_configs', preview: preview})
+    });
+    const data = await res.json();
+    
+    if (data.results) {
+      previewEl.innerHTML = `
+        <div class="info-bar">
+          <span class="icon">${preview ? '👁' : '✅'}</span>
+          ${preview ? 'Preview' : 'Converted'}: ${data.results.filter(r => r.ok).length}/${data.results.length} files
+        </div>
+        ${data.results.map(r => `
+          <div style="margin-bottom: 12px;">
+            <div style="font-size: 12px; font-weight: 600; color: var(--fg); margin-bottom: 4px;">
+              ${r.name} ${r.ok ? '✅' : '❌'}
+            </div>
+            ${r.preview ? `<div class="preview-box">${escapeHtml(r.preview)}</div>` : ''}
+            ${r.error ? `<div style="color: var(--danger); font-size: 11px;">${r.error}</div>` : ''}
+          </div>
+        `).join('')}
+      `;
+    }
+    
+    // Refresh the file list
+    if (!preview) migrationScan();
+  } catch(e) {
+    previewEl.innerHTML = `<div class="info-bar"><span class="icon">❌</span> Error: ${e.message}</div>`;
+  }
+}
+
+async function migrationLoadExample() {
+  const content = document.getElementById('migration-content');
+  content.innerHTML = '<div class="info-bar"><span class="icon">⏳</span> Loading example from GitHub...</div>';
+  
+  try {
+    const res = await fetch('/api/system', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'load_example'})
+    });
+    const data = await res.json();
+    
+    if (data.content) {
+      content.innerHTML = `
+        <div class="info-bar">
+          <span class="icon">📄</span>
+          Official Hyprland Lua example from <a href="https://github.com/hyprwm/Hyprland/blob/main/example/hyprland.lua" target="_blank" style="color: var(--accent);">GitHub</a>
+        </div>
+        <div class="preview-box">${escapeHtml(data.content)}</div>
+        <div class="btn-group">
+          <button class="btn btn-accent" onclick="migrationSaveExample()">💾 Save as hyprland.lua</button>
+        </div>
+      `;
+    } else {
+      content.innerHTML = `<div class="info-bar"><span class="icon">❌</span> Error loading example</div>`;
+    }
+  } catch(e) {
+    content.innerHTML = `<div class="info-bar"><span class="icon">❌</span> Error: ${e.message}</div>`;
+  }
+}
+
+async function migrationSaveExample() {
+  try {
+    const res = await fetch('/api/system', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'save_example'})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showToast('Saved to ~/.config/hypr/hyprland.lua');
+    } else {
+      showToast('Error: ' + (data.error || 'Unknown'));
+    }
+  } catch(e) {
+    showToast('Error: ' + e.message);
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
 function renderPresets(el) {
   el.innerHTML = `
     ${makeHeader('Presets', '★', 'Quick visual presets')}
@@ -1804,6 +2076,78 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 try:
                     subprocess.run(['localectl', 'set-locale', f'LANG={locale}'], capture_output=True, text=True, timeout=10)
                     result = {"ok": True}
+                except Exception as e:
+                    result = {"ok": False, "error": str(e)}
+            elif action == 'scan_configs':
+                try:
+                    hypr_dir = os.path.expanduser("~/.config/hypr")
+                    files = []
+                    for f in sorted(os.listdir(hypr_dir)):
+                        if f.endswith('.conf') and f not in ('hyprlock.conf', 'hypridle.conf', 'hyprsunset.conf', 'xdph.conf'):
+                            lua_path = os.path.join(hypr_dir, f.replace('.conf', '.lua'))
+                            files.append({
+                                "name": f,
+                                "path": os.path.join(hypr_dir, f),
+                                "has_lua": os.path.exists(lua_path)
+                            })
+                    result = {"files": files}
+                except Exception as e:
+                    result = {"files": [], "error": str(e)}
+            elif action == 'convert_configs':
+                preview_mode = body.get('preview', False)
+                try:
+                    import sys
+                    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                    from hyprland_conf_to_lua import HyprlangToLua, convert_single_file
+                    
+                    hypr_dir = os.path.expanduser("~/.config/hypr")
+                    results = []
+                    for f in sorted(os.listdir(hypr_dir)):
+                        if f.endswith('.conf') and f not in ('hyprlock.conf', 'hypridle.conf', 'hyprsunset.conf', 'xdph.conf'):
+                            conf_path = os.path.join(hypr_dir, f)
+                            lua_path = os.path.join(hypr_dir, f.replace('.conf', '.lua'))
+                            
+                            try:
+                                with open(conf_path, 'r') as fh:
+                                    content = fh.read()
+                                
+                                converter = HyprlangToLua(source_file=conf_path)
+                                lua_content = converter.convert(content)
+                                
+                                if preview_mode:
+                                    results.append({"name": f, "ok": True, "preview": lua_content[:2000]})
+                                else:
+                                    with open(lua_path, 'w') as fh:
+                                        fh.write(lua_content)
+                                    results.append({"name": f, "ok": True})
+                            except Exception as e:
+                                results.append({"name": f, "ok": False, "error": str(e)})
+                    
+                    result = {"results": results}
+                except Exception as e:
+                    result = {"results": [], "error": str(e)}
+            elif action == 'load_example':
+                try:
+                    import urllib.request
+                    url = "https://raw.githubusercontent.com/hyprwm/Hyprland/main/example/hyprland.lua"
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Hyprland-Settings-Panel'})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        content = resp.read().decode('utf-8')
+                    result = {"content": content}
+                except Exception as e:
+                    result = {"error": str(e)}
+            elif action == 'save_example':
+                try:
+                    import urllib.request
+                    url = "https://raw.githubusercontent.com/hyprwm/Hyprland/main/example/hyprland.lua"
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Hyprland-Settings-Panel'})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        content = resp.read().decode('utf-8')
+                    
+                    lua_path = os.path.expanduser("~/.config/hypr/hyprland.lua")
+                    with open(lua_path, 'w') as f:
+                        f.write(content)
+                    result = {"ok": True, "path": lua_path}
                 except Exception as e:
                     result = {"ok": False, "error": str(e)}
             else:

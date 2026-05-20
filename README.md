@@ -14,6 +14,13 @@ A visual settings panel for Hyprland with a modern web UI.
 - **Search** — Filter settings by name
 - **Systemd Compatible** — SIGTERM handler for clean shutdown
 
+## Lua Migration
+
+- **Scan Configs** — Automatically discover `.conf` files in `~/.config/hypr/`
+- **Preview Conversion** — See how your existing configs translate to Lua before committing
+- **Convert All** — Batch convert all detected `.conf` files to `.lua` format
+- **Load Official Example** — Fetch and display the official Hyprland Lua example from GitHub for reference
+
 ## Installation
 
 ```bash
@@ -68,7 +75,7 @@ bind = SUPER ALT, V, exec, hyprland-settings-panel
 
 ## Requirements
 
-- Hyprland 0.54+
+- Hyprland 0.54+ (Lua support requires Hyprland 0.55+)
 - Python 3.10+
 - `hyprctl` available in PATH
 - `localectl` (optional, for locale management)

@@ -217,8 +217,8 @@ class HyprlangToLua:
                 self._convert_windowrule(rule, v2=True)
                 return
 
-        # bind/bindd/binddm/... 
-        if stripped.startswith("bind"):
+        # bind/bindd/binddm/... (but NOT "binds {" which is a section)
+        if stripped.startswith("bind") and "=" in stripped and not stripped.startswith("binds "):
             self._convert_bind(stripped)
             return
 
@@ -240,8 +240,8 @@ class HyprlangToLua:
                 self.add(f'hl.plugin("{plugin}", {{ {option} = {value} }})')
                 return
 
-        # bezier = "name, x1, y1, x2, y2" (standalone, parse before sections)
-        if stripped.startswith("bezier"):
+        # bezier = "name, x1, y1, x2, y2" (standalone, top-level only)
+        if stripped.startswith("bezier") and self.indent == 0:
             match = re.match(r'bezier\s*=\s*(.+)', stripped)
             if match:
                 args = match.group(1).strip().strip('"')
@@ -249,16 +249,11 @@ class HyprlangToLua:
                 if len(parts) >= 5:
                     name = parts[0]
                     points = ", ".join(parts[1:])
-                    # If inside a section, close it first
-                    if self.indent > 0:
-                        self.indent = 0
-                        self.add("})  -- end hl.config")
-                        self.add_raw("")
                     self.add(f'hl.curve("{name}", {{ type = "bezier", points = {{ {{ {points} }} }} }})')
                     return
 
-        # animation = "name, on/off, speed, curve, style" (standalone, parse before sections)
-        if stripped.startswith("animation"):
+        # animation = "name, on/off, speed, curve, style" (standalone, top-level only)
+        if stripped.startswith("animation") and self.indent == 0:
             match = re.match(r'animation\s*=\s*(.+)', stripped)
             if match:
                 args = match.group(1).strip().strip('"')
@@ -270,11 +265,6 @@ class HyprlangToLua:
                     bezier = parts[3]
                     style = parts[4] if len(parts) > 4 else None
                     style_arg = f', style = "{style}"' if style else ""
-                    # If inside a section, close it first
-                    if self.indent > 0:
-                        self.indent = 0
-                        self.add("})  -- end hl.config")
-                        self.add_raw("")
                     self.add(f'hl.animation({{ leaf = "{leaf}", enabled = {"true" if enabled else "false"}, speed = {speed}, bezier = "{bezier}"{style_arg} }})')
                     return
 
@@ -304,7 +294,12 @@ class HyprlangToLua:
                 if len(parts) >= 5:
                     name = parts[0]
                     points = ", ".join(parts[1:])
-                    self.add(f'hl.curve("{name}", {{ type = "bezier", points = {{ {{ {points} }} }} }})')
+                    if self.indent > 0:
+                        # Inside a section - emit as table entry
+                        self.add(f'["{name}"] = {{ type = "bezier", points = {{ {{ {points} }} }} }},')
+                    else:
+                        # Top-level - emit as hl.curve()
+                        self.add(f'hl.curve("{name}", {{ type = "bezier", points = {{ {{ {points} }} }} }})')
                     return
 
         # animation = "name, on/off, speed, curve, style"
@@ -320,11 +315,16 @@ class HyprlangToLua:
                     bezier = parts[3]
                     style = parts[4] if len(parts) > 4 else None
                     style_arg = f', style = "{style}"' if style else ""
-                    self.add(f'hl.animation({{ leaf = "{leaf}", enabled = {"true" if enabled else "false"}, speed = {speed}, bezier = "{bezier}"{style_arg} }})')
+                    if self.indent > 0:
+                        # Inside a section - emit as table entry
+                        self.add(f'["{leaf}"] = {{ enabled = {"true" if enabled else "false"}, speed = {speed}, bezier = "{bezier}"{style_arg} }},')
+                    else:
+                        # Top-level - emit as hl.animation()
+                        self.add(f'hl.animation({{ leaf = "{leaf}", enabled = {"true" if enabled else "false"}, speed = {speed}, bezier = "{bezier}"{style_arg} }})')
                     return
 
         # env = KEY, VALUE
-        if stripped.startswith("env"):
+        if stripped.startswith("env "):
             match = re.match(r'env\s*=\s*(.+)', stripped)
             if match:
                 args = match.group(1).strip()
@@ -339,8 +339,6 @@ class HyprlangToLua:
             if match:
                 key = self.convert_key(match.group(1))
                 value = self.convert_value(match.group(2))
-                self.add(f"{key} = {value},")
-                return
                 if "." in key:
                     parts = key.split(".", 1)
                     parent = self.convert_key(parts[0])
@@ -384,7 +382,7 @@ class HyprlangToLua:
         """Convert monitor = args to hl.monitor({...})."""
         parts = [p.strip() for p in args.split(",")]
         if len(parts) >= 1:
-            output = parts[0] if parts[0] else '""'
+            output = parts[0].strip() if parts[0].strip() else "" 
             mode = parts[1] if len(parts) > 1 else "preferred"
             position = parts[2] if len(parts) > 2 else "auto"
             scale = parts[3] if len(parts) > 3 else "1"
@@ -481,9 +479,24 @@ class HyprlangToLua:
         if "," in rule:
             parts = [p.strip() for p in rule.split(",", 1)]
             if len(parts) == 2:
-                action = parts[0]
-                selector = parts[1]
-                self.add(f'hl.windowrule({{ "{action}", match = {{ {selector} }} }})')
+                action = parts[0].strip()
+                selector = parts[1].strip()
+                # Parse v2 selectors like "match:title ^(Hyprland Settings)$"
+                # or "title:^(Hyprland Settings)$"
+                if selector.startswith("match:"):
+                    # match:title pattern → title = "pattern"
+                    sel_parts = selector.split(" ", 1)
+                    match_type = sel_parts[0].replace("match:", "")
+                    pattern = sel_parts[1] if len(sel_parts) > 1 else ""
+                    self.add(f'hl.windowrule({{ "{action}", match = {{ {match_type} = "{pattern}" }} }})')
+                elif ":" in selector.split(" ")[0]:
+                    # title:pattern format
+                    sel_parts = selector.split(" ", 1)
+                    match_type, pattern = sel_parts[0].split(":", 1)
+                    self.add(f'hl.windowrule({{ "{action}", match = {{ {match_type} = "{pattern}" }} }})')
+                else:
+                    # Simple selector
+                    self.add(f'hl.windowrule({{ "{action}", match = {{ "{selector}" }} }})')
                 return
         self.add(f'hl.windowrule({{ "{rule}" }})')
 
@@ -505,9 +518,36 @@ class HyprlangToLua:
 
         # Wrap in hl.config({}) if we have settings (not just require/exec)
         has_settings = any(
-            "hl.config" not in l and "require" not in l and "--" not in l and l.strip()
+            "hl.config" not in l and "require" not in l and "hl.bind" not in l and "hl.exec" not in l and "hl.on" not in l and "hl.curve" not in l and "hl.animation" not in l and "hl.monitor" not in l and "hl.env" not in l and "hl.plugin" not in l and "hl.unbind" not in l and "hl.workspace" not in l and "--" not in l and l.strip()
             for l in self.output
         )
+
+        if has_settings:
+            # Check if we have top-level sections that need wrapping
+            has_sections = any(
+                re.match(r'^\w+ = \{', l.strip())
+                for l in self.output
+            )
+            if has_sections:
+                # Find first section and wrap everything after header in hl.config
+                new_output = []
+                header_done = False
+                for i, line in enumerate(self.output):
+                    if not header_done and (line.startswith("--") or line.strip() == ""):
+                        new_output.append(line)
+                    else:
+                        if not header_done:
+                            header_done = True
+                            new_output.append("hl.config({")
+                            new_output.append("")
+                        # Indent the content
+                        if line.strip():
+                            new_output.append("  " + line)
+                        else:
+                            new_output.append("")
+                new_output.append("")
+                new_output.append("})")
+                self.output = new_output
 
         return "\n".join(self.output)
 

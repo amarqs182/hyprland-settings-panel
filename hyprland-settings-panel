@@ -1,0 +1,1745 @@
+#!/usr/bin/env python3
+"""
+Hyprland Settings Panel — Painel completo com TODAS as opções
+Layout com sidebar, sliders, toggles, color pickers, selects
+Compatível com Hyprland 0.54.x (hyprlang)
+"""
+
+import subprocess
+import json
+import http.server
+import threading
+import webbrowser
+import os
+import signal
+import sys
+
+PORT = 9847
+
+def hyprctl(cmd):
+    try:
+        result = subprocess.run(
+            f"hyprctl {cmd}", shell=True, capture_output=True, text=True, timeout=5
+        )
+        return result.stdout.strip()
+    except:
+        return ""
+
+def get_option(opt):
+    try:
+        data = json.loads(hyprctl(f"getoption {opt} -j"))
+        if "float" in data:
+            return {"value": data["float"], "type": "float"}
+        elif "int" in data:
+            return {"value": data["int"], "type": "int"}
+        elif "str" in data:
+            return {"value": data["str"], "type": "str"}
+        elif "bool" in data:
+            return {"value": data["bool"], "type": "bool"}
+        elif "custom" in data:
+            return {"value": data["custom"], "type": "custom"}
+        return {"value": 0, "type": "unknown"}
+    except:
+        return {"value": 0, "type": "unknown"}
+
+USER_SETTINGS_DIR = os.path.expanduser("~/.config/hypr")
+USER_SETTINGS_JSON = os.path.expanduser("~/.config/hypr/user-settings.json")
+USER_SETTINGS_CONF = os.path.expanduser("~/.config/hypr/user-settings.conf")
+HYPRLAND_CONF = os.path.expanduser("~/.config/hypr/hyprland.conf")
+
+def parse_colors_toml(path):
+    colors = {}
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    parts = line.split("=", 1)
+                    k = parts[0].strip()
+                    v = parts[1].strip().strip('"').strip("'")
+                    colors[k] = v
+    except Exception as e:
+        print(f"Error parsing colors.toml: {e}")
+    return colors
+
+def get_theme_styles():
+    theme_name = "catppuccin"
+    try:
+        result = subprocess.run(["omarchy", "theme", "current"], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0:
+            theme_name = result.stdout.strip()
+    except Exception as e:
+        print(f"Error getting theme name: {e}")
+
+    colors = None
+    name_lower = theme_name.lower()
+    paths = [
+        os.path.expanduser(f"~/.config/omarchy/themes/{name_lower}/colors.toml"),
+        os.path.expanduser(f"~/.local/share/omarchy/themes/{name_lower}/colors.toml"),
+        os.path.expanduser(f"~/.config/omarchy/themes/{theme_name}/colors.toml"),
+        os.path.expanduser(f"~/.local/share/omarchy/themes/{theme_name}/colors.toml"),
+    ]
+    for path in paths:
+        if os.path.exists(path):
+            colors = parse_colors_toml(path)
+            break
+
+    if not colors:
+        return ""
+
+    bg = colors.get("background", "#111111")
+    fg = colors.get("foreground", "#e0e0e0")
+    accent = colors.get("accent", "#F5B700")
+    
+    bg2 = colors.get("surface_2", colors.get("surface", bg))
+    bg3 = colors.get("surface", bg2)
+    bg4 = colors.get("selection_background", bg3)
+    
+    border = colors.get("border", "#2a2a2a")
+    border2 = colors.get("soft_border", border)
+    
+    hover = colors.get("hover_surface", bg2)
+    active = colors.get("selection_background", bg3)
+    
+    success = colors.get("success", "#4ade80")
+    danger = colors.get("danger", "#f87171")
+    
+    is_light = False
+    for p in paths:
+        d = os.path.dirname(p)
+        if os.path.exists(d) and os.path.isdir(d):
+            if os.path.exists(os.path.join(d, "light.mode")):
+                is_light = True
+                break
+    
+    if not is_light:
+        try:
+            hex_val = bg.lstrip('#')
+            r, g, b = int(hex_val[0:2], 16), int(hex_val[2:4], 16), int(hex_val[4:6], 16)
+            brightness = (r * 299 + g * 587 + b * 114) / 1000
+            if brightness > 128:
+                is_light = True
+        except:
+            pass
+
+    if is_light:
+        fg2 = colors.get("muted", "#666666")
+        fg3 = "#888888"
+        accent2 = accent
+        accent3 = "#FEF3C7"
+        shadow = "rgba(0,0,0,0.06)"
+    else:
+        fg2 = colors.get("muted", "#888888")
+        fg3 = "#555555"
+        accent2 = colors.get("accent_bright", accent)
+        accent3 = "rgba(245, 183, 0, 0.15)"
+        shadow = "rgba(0,0,0,0.3)"
+
+    css = f"""
+:root {{
+  --bg: {bg};
+  --bg2: {bg2};
+  --bg3: {bg3};
+  --bg4: {bg4};
+  --fg: {fg};
+  --fg2: {fg2};
+  --fg3: {fg3};
+  --accent: {accent};
+  --accent2: {accent2};
+  --accent3: {accent3};
+  --border: {border};
+  --border2: {border2};
+  --hover: {hover};
+  --active: {active};
+  --success: {success};
+  --danger: {danger};
+  --radius: 6px;
+  --radius2: 10px;
+  --shadow: 0 2px 8px {shadow};
+  --transition: 0.15s ease;
+}}
+    """
+    return css
+
+def dict_to_hyprland_config(flat_dict):
+    nested = {}
+    for key, val in flat_dict.items():
+        parts = key.replace('.', ':').split(':')
+        d = nested
+        for part in parts[:-1]:
+            d = d.setdefault(part, {})
+        d[parts[-1]] = val
+    
+    def serialize(d, indent=0):
+        lines = []
+        pad = "  " * indent
+        for k, v in sorted(d.items()):
+            if isinstance(v, dict):
+                lines.append(f"{pad}{k} {{")
+                lines.extend(serialize(v, indent + 1))
+                lines.append(f"{pad}}}")
+            else:
+                if isinstance(v, bool):
+                    val_str = "true" if v else "false"
+                elif v is None:
+                    continue
+                else:
+                    val_str = str(v)
+                lines.append(f"{pad}{k} = {val_str}")
+        return lines
+    
+    return "\n".join(serialize(nested))
+
+def ensure_source_in_hyprland_conf():
+    source_line = "source = ~/.config/hypr/user-settings.conf"
+    try:
+        if os.path.exists(HYPRLAND_CONF):
+            with open(HYPRLAND_CONF, 'r') as f:
+                content = f.read()
+            if source_line not in content:
+                with open(HYPRLAND_CONF, 'a') as f:
+                    f.write(f"\n\n# Sourced settings from Hyprland Settings Panel\n{source_line}\n")
+    except Exception as e:
+        print(f"Error updating hyprland.conf: {e}")
+
+def set_option(opt, value):
+    if isinstance(value, bool):
+        val_str = "true" if value else "false"
+    else:
+        val_str = str(value)
+    hyprctl(f"keyword {opt} {val_str}")
+    
+    try:
+        os.makedirs(USER_SETTINGS_DIR, exist_ok=True)
+        if os.path.exists(USER_SETTINGS_JSON):
+            with open(USER_SETTINGS_JSON, 'r') as f:
+                settings = json.load(f)
+        else:
+            settings = {}
+            
+        settings[opt] = value
+        
+        with open(USER_SETTINGS_JSON, 'w') as f:
+            json.dump(settings, f, indent=2)
+            
+        nested_conf = dict_to_hyprland_config(settings)
+        
+        window_rules = (
+            "\n# Window rules for Visual Settings App\n"
+            "windowrule = float on, match:title ^(Hyprland Settings)$\n"
+            "windowrule = size 1024 720, match:title ^(Hyprland Settings)$\n"
+            "windowrule = center on, match:title ^(Hyprland Settings)$\n"
+        )
+        
+        with open(USER_SETTINGS_CONF, 'w') as f:
+            f.write("# Generated by Hyprland Settings Panel\n# Do not edit manually!\n\n" + nested_conf + "\n" + window_rules + "\n")
+            
+        ensure_source_in_hyprland_conf()
+    except Exception as e:
+        print(f"Error saving setting {opt}: {e}")
+
+
+HTML = r"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Hyprland Settings</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap');
+
+/* THEME_VARIABLES */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  background: var(--bg);
+  color: var(--fg);
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  font-size: 13px;
+}
+
+/* Sidebar */
+.sidebar {
+  width: 240px;
+  min-width: 240px;
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.sidebar-header {
+  padding: 20px 16px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sidebar-header .logo {
+  width: 28px;
+  height: 28px;
+  background: var(--accent);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  color: var(--bg);
+  font-size: 14px;
+}
+
+.sidebar-header .title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: 0.5px;
+}
+
+.sidebar-header .version {
+  font-size: 10px;
+  color: var(--fg3);
+  margin-left: auto;
+}
+
+.sidebar-group {
+  padding: 8px 0;
+}
+
+.sidebar-group-title {
+  padding: 8px 16px 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--fg3);
+  font-weight: 600;
+}
+
+.sidebar-item {
+  padding: 8px 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--fg2);
+  transition: all var(--transition);
+  border-left: 3px solid transparent;
+  margin: 1px 0;
+}
+
+.sidebar-item:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.sidebar-item.active {
+  background: var(--bg3);
+  color: var(--accent);
+  border-left-color: var(--accent);
+}
+
+.sidebar-item .icon {
+  width: 18px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.sidebar-item .badge {
+  margin-left: auto;
+  background: var(--bg4);
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  color: var(--fg3);
+}
+
+/* Main content */
+.main {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 32px;
+  background: var(--bg);
+}
+
+.main-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.main-header h2 {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.main-header h2 .icon {
+  color: var(--accent);
+  font-size: 22px;
+}
+
+.main-header .subtitle {
+  font-size: 12px;
+  color: var(--fg3);
+}
+
+/* Search */
+.search-box {
+  position: relative;
+  width: 300px;
+}
+
+.search-box input {
+  width: 100%;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--fg);
+  padding: 8px 12px 8px 32px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.search-box input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.search-box::before {
+  content: '⌕';
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--fg3);
+}
+
+/* Settings grid */
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+/* Setting card */
+.setting-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  transition: all var(--transition);
+}
+
+.setting-card:hover {
+  border-color: var(--border2);
+  background: var(--bg3);
+}
+
+.setting-card .header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.setting-card .label {
+  font-size: 11px;
+  color: var(--fg2);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.setting-card .opt-name {
+  font-size: 10px;
+  color: var(--fg3);
+  font-family: inherit;
+}
+
+.setting-card .value-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.setting-card .current-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  min-width: 50px;
+  text-align: right;
+}
+
+/* Toggle switch */
+.toggle {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle .slider {
+  position: absolute;
+  inset: 0;
+  background: var(--bg4);
+  border-radius: 12px;
+  transition: var(--transition);
+}
+
+.toggle .slider::before {
+  content: '';
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  left: 3px;
+  bottom: 3px;
+  background: var(--fg3);
+  border-radius: 50%;
+  transition: var(--transition);
+}
+
+.toggle input:checked + .slider {
+  background: var(--accent2);
+}
+
+.toggle input:checked + .slider::before {
+  background: var(--accent);
+  transform: translateX(20px);
+}
+
+/* Slider input */
+input[type="range"] {
+  flex: 1;
+  height: 4px;
+  -webkit-appearance: none;
+  background: var(--bg4);
+  border-radius: 2px;
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+/* Number input */
+input[type="number"] {
+  width: 65px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  text-align: center;
+}
+
+input[type="number"]:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* Text input */
+input[type="text"] {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+input[type="text"]:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* Select */
+select {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+select:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* Color input */
+input[type="color"] {
+  width: 36px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  cursor: pointer;
+  padding: 2px;
+}
+
+/* Buttons */
+.btn-group {
+  display: flex;
+  gap: 6px;
+}
+
+.btn {
+  padding: 6px 12px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all var(--transition);
+  white-space: nowrap;
+}
+
+.btn:hover {
+  background: var(--hover);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn-accent {
+  background: var(--accent3);
+  border-color: var(--accent2);
+  color: var(--accent);
+}
+
+.btn-accent:hover {
+  background: var(--accent2);
+  color: var(--bg);
+}
+
+.btn-sm {
+  padding: 4px 8px;
+  font-size: 10px;
+}
+
+/* Preset cards */
+.presets-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.preset-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius2);
+  padding: 16px;
+  cursor: pointer;
+  transition: all var(--transition);
+  text-align: center;
+}
+
+.preset-card:hover {
+  border-color: var(--accent);
+  background: var(--bg3);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow);
+}
+
+.preset-card .icon {
+  font-size: 28px;
+  margin-bottom: 8px;
+}
+
+.preset-card .name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  margin-bottom: 4px;
+}
+
+.preset-card .desc {
+  font-size: 11px;
+  color: var(--fg3);
+}
+
+/* Info bar */
+.info-bar {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--fg2);
+}
+
+.info-bar .icon {
+  color: var(--accent);
+  font-size: 16px;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--fg3); }
+
+/* Toast notification */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: var(--bg3);
+  border: 1px solid var(--accent2);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  font-size: 12px;
+  color: var(--accent);
+  transform: translateY(100px);
+  opacity: 0;
+  transition: all 0.3s ease;
+  z-index: 1000;
+}
+
+.toast.show {
+  transform: translateY(0);
+  opacity: 1;
+}
+</style>
+</head>
+<body>
+
+<div class="sidebar">
+  <div class="sidebar-header">
+    <div class="logo">H</div>
+    <div class="title">Hyprland</div>
+    <div class="version">0.54</div>
+  </div>
+  
+  <div style="padding: 10px 16px; border-bottom: 1px solid var(--border);">
+    <div class="search-box" style="width: 100%;">
+      <input type="text" placeholder="Search settings..." oninput="filterSettings(this.value)" style="width: 100%;">
+    </div>
+  </div>
+  
+  <div class="sidebar-group">
+    <div class="sidebar-group-title">Window Management</div>
+    <div class="sidebar-item active" onclick="showSection('general')">
+      <span class="icon">⊞</span> General
+    </div>
+    <div class="sidebar-item" onclick="showSection('decoration')">
+      <span class="icon">◐</span> Decoration
+    </div>
+    <div class="sidebar-item" onclick="showSection('animations')">
+      <span class="icon">✨</span> Animations
+    </div>
+    <div class="sidebar-item" onclick="showSection('group')">
+      <span class="icon">⊞</span> Group
+    </div>
+    <div class="sidebar-item" onclick="showSection('dwindle')">
+      <span class="icon">◫</span> Dwindle
+    </div>
+    <div class="sidebar-item" onclick="showSection('master')">
+      <span class="icon">▣</span> Master
+    </div>
+    <div class="sidebar-item" onclick="showSection('scrolling')">
+      <span class="icon">⇄</span> Scrolling
+    </div>
+  </div>
+  
+  <div class="sidebar-group">
+    <div class="sidebar-group-title">Input</div>
+    <div class="sidebar-item" onclick="showSection('input')">
+      <span class="icon">⌨</span> Keyboard
+    </div>
+    <div class="sidebar-item" onclick="showSection('touchpad')">
+      <span class="icon">⊡</span> Touchpad
+    </div>
+    <div class="sidebar-item" onclick="showSection('gestures')">
+      <span class="icon">🤏</span> Gestures
+    </div>
+    <div class="sidebar-item" onclick="showSection('locale')">
+      <span class="icon">🌐</span> Locale
+    </div>
+    <div class="sidebar-item" onclick="showSection('tablet')">
+      <span class="icon">✎</span> Tablet
+    </div>
+    <div class="sidebar-item" onclick="showSection('cursor')">
+      <span class="icon">⊕</span> Cursor
+    </div>
+  </div>
+  
+  <div class="sidebar-group">
+    <div class="sidebar-group-title">System</div>
+    <div class="sidebar-item" onclick="showSection('misc')">
+      <span class="icon">⚙</span> Misc
+    </div>
+    <div class="sidebar-item" onclick="showSection('binds')">
+      <span class="icon">⌘</span> Binds
+    </div>
+    <div class="sidebar-item" onclick="showSection('xwayland')">
+      <span class="icon">⊞</span> XWayland
+    </div>
+    <div class="sidebar-item" onclick="showSection('ecosystem')">
+      <span class="icon">🌐</span> Ecosystem
+    </div>
+  </div>
+  
+  <div class="sidebar-group">
+    <div class="sidebar-group-title">Quick Actions</div>
+    <div class="sidebar-item" onclick="showSection('presets')">
+      <span class="icon">★</span> Presets
+    </div>
+    <div class="sidebar-item" onclick="location.reload()">
+      <span class="icon">↻</span> Refresh
+    </div>
+  </div>
+</div>
+
+<div class="main" id="main-content">
+  <!-- Content loaded dynamically -->
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '/api';
+
+async function api(action, opt, value) {
+  const res = await fetch(API, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action, opt, value})
+  });
+  return await res.json();
+}
+
+async function getOpt(opt) {
+  return await api('get', opt);
+}
+
+async function setOpt(opt, value) {
+  await api('set', opt, value);
+  showToast(`${opt} = ${value}`);
+}
+
+function showToast(msg) {
+  const toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 2000);
+}
+
+function showSection(name) {
+  document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
+  
+  // Limpar campo de busca ao trocar de seção
+  const searchInput = document.querySelector('.search-box input');
+  if (searchInput) searchInput.value = '';
+  
+  // Garantir classe active na sidebar se houver evento de clique
+  if (window.event && window.event.target) {
+    const item = window.event.target.closest('.sidebar-item');
+    if (item) item.classList.add('active');
+  }
+  
+  const main = document.getElementById('main-content');
+  switch(name) {
+    case 'general': renderGeneral(main); break;
+    case 'decoration': renderDecoration(main); break;
+    case 'animations': renderAnimations(main); break;
+    case 'group': renderGroup(main); break;
+    case 'dwindle': renderDwindle(main); break;
+    case 'master': renderMaster(main); break;
+    case 'scrolling': renderScrolling(main); break;
+    case 'input': renderInput(main); break;
+    case 'touchpad': renderTouchpad(main); break;
+    case 'gestures': renderGestures(main); break;
+    case 'tablet': renderTablet(main); break;
+    case 'cursor': renderCursor(main); break;
+    case 'misc': renderMisc(main); break;
+    case 'binds': renderBinds(main); break;
+    case 'xwayland': renderXWayland(main); break;
+    case 'ecosystem': renderEcosystem(main); break;
+    case 'presets': renderPresets(main); break;
+    case 'locale': renderLocale(main); break;
+  }
+}
+
+function filterSettings(query) {
+  const q = query.toLowerCase();
+  document.querySelectorAll('.setting-card').forEach(card => {
+    const label = (card.querySelector('.label')?.textContent || '').toLowerCase();
+    const optName = (card.querySelector('.opt-name')?.textContent || '').toLowerCase();
+    if (label.includes(q) || optName.includes(q)) {
+      card.style.display = '';
+    } else {
+      card.style.display = 'none';
+    }
+  });
+}
+
+function parseHyprlandColor(val) {
+  if (!val) return null;
+  val = val.trim();
+  if (val.startsWith('0x')) {
+    let hex = val.substring(2);
+    if (hex.length === 8) {
+      let a = parseInt(hex.substring(0, 2), 16) / 255;
+      let r = parseInt(hex.substring(2, 4), 16);
+      let g = parseInt(hex.substring(4, 6), 16);
+      let b = parseInt(hex.substring(6, 8), 16);
+      return `rgba(${r}, ${g}, ${b}, ${a})`;
+    } else if (hex.length === 6) {
+      return `#${hex}`;
+    }
+  }
+  const rgbaMatch = val.match(/rgba\(([0-9a-fA-F]{8})\)/);
+  if (rgbaMatch) {
+    let hex = rgbaMatch[1];
+    let r = parseInt(hex.substring(0, 2), 16);
+    let g = parseInt(hex.substring(2, 4), 16);
+    let b = parseInt(hex.substring(4, 6), 16);
+    let a = parseInt(hex.substring(6, 8), 16) / 255;
+    return `rgba(${r}, ${g}, ${b}, ${a})`;
+  }
+  const rgbMatch = val.match(/rgb\(([0-9a-fA-F]{6})\)/);
+  if (rgbMatch) {
+    return `#${rgbMatch[1]}`;
+  }
+  if (val.includes(' ')) {
+    let parts = val.split(/\s+/);
+    let first = parseHyprlandColor(parts[0]);
+    if (first) return first;
+  }
+  return null;
+}
+
+function makeToggle(opt, label, desc) {
+  return getOpt(opt).then(data => `
+    <div class="setting-card">
+      <div class="header">
+        <div class="label">${label}</div>
+        <div class="opt-name">${opt}</div>
+      </div>
+      <div class="value-row">
+        <label class="toggle">
+          <input type="checkbox" ${data.value ? 'checked' : ''} 
+                 onchange="setOpt('${opt}', this.checked); this.closest('.setting-card').querySelector('.current-value').textContent = this.checked ? 'ON' : 'OFF'">
+          <span class="slider"></span>
+        </label>
+        <span class="current-value">${data.value ? 'ON' : 'OFF'}</span>
+        ${desc ? `<span style="font-size:11px;color:var(--fg3);margin-left:auto">${desc}</span>` : ''}
+      </div>
+    </div>
+  `);
+}
+
+function makeSlider(opt, label, min, max, step, desc) {
+  return getOpt(opt).then(data => `
+    <div class="setting-card">
+      <div class="header">
+        <div class="label">${label}</div>
+        <div class="opt-name">${opt}</div>
+      </div>
+      <div class="value-row">
+        <input type="range" min="${min}" max="${max}" step="${step}" value="${data.value}"
+               oninput="this.parentElement.querySelector('.current-value').textContent=this.value"
+               onchange="setOpt('${opt}', this.value)">
+        <span class="current-value">${data.value}</span>
+        <input type="number" min="${min}" max="${max}" step="${step}" value="${data.value}"
+               onchange="setOpt('${opt}', this.value); this.previousElementSibling.previousElementSibling.value=this.value">
+      </div>
+      ${desc ? `<div style="font-size:10px;color:var(--fg3);margin-top:6px">${desc}</div>` : ''}
+    </div>
+  `);
+}
+
+function makeSelect(opt, label, options, desc) {
+  return getOpt(opt).then(data => `
+    <div class="setting-card">
+      <div class="header">
+        <div class="label">${label}</div>
+        <div class="opt-name">${opt}</div>
+      </div>
+      <div class="value-row">
+        <select onchange="setOpt('${opt}', this.value)">
+          ${options.map(o => `<option value="${o}" ${data.value === o ? 'selected' : ''}>${o}</option>`).join('')}
+        </select>
+      </div>
+      ${desc ? `<div style="font-size:10px;color:var(--fg3);margin-top:6px">${desc}</div>` : ''}
+    </div>
+  `);
+}
+
+function makeText(opt, label, desc) {
+  return getOpt(opt).then(data => {
+    const isColor = opt.includes('col.') || opt.includes('color');
+    const colorPreview = isColor ? parseHyprlandColor(data.value) : null;
+    const previewStyle = colorPreview ? `background: ${colorPreview}; border: 1px solid var(--border2); width: 20px; height: 20px; border-radius: 4px; display: inline-block;` : 'display: none;';
+    
+    return `
+      <div class="setting-card">
+        <div class="header">
+          <div class="label">${label}</div>
+          <div class="opt-name">${opt}</div>
+        </div>
+        <div class="value-row">
+          <span class="color-preview" style="${previewStyle}"></span>
+          <input type="text" value="${data.value || ''}" placeholder="..."
+                 oninput="if(this.parentElement.querySelector('.color-preview')) { const c = parseHyprlandColor(this.value); if(c) { this.parentElement.querySelector('.color-preview').style.background = c; this.parentElement.querySelector('.color-preview').style.display = 'inline-block'; } else { this.parentElement.querySelector('.color-preview').style.display = 'none'; } }"
+                 onchange="setOpt('${opt}', this.value)">
+        </div>
+        ${desc ? `<div style="font-size:10px;color:var(--fg3);margin-top:6px">${desc}</div>` : ''}
+      </div>
+    `;
+  });
+}
+
+function makeHeader(title, icon, subtitle) {
+  return `
+    <div class="main-header">
+      <h2><span class="icon">${icon}</span> ${title}</h2>
+      <div class="subtitle">${subtitle}</div>
+    </div>
+  `;
+}
+
+async function renderSection(el, title, icon, subtitle, items) {
+  el.innerHTML = makeHeader(title, icon, subtitle) + '<div class="settings-grid" id="grid"></div>';
+  const grid = document.getElementById('grid');
+  const results = await Promise.all(items);
+  grid.innerHTML = results.join('');
+}
+
+async function renderAnimations(el) {
+  await renderSection(el, 'Animations', '✨', 'Master switch, bezier curves, animation rules', [
+    makeToggle('animations:enabled', 'Enable Animations', 'Master switch for all animations'),
+  ]);
+  
+  const extraHTML = `
+    <div style="margin-top:20px">
+      <h3 style="font-size:14px;margin-bottom:12px;color:var(--fg)">Active Curves & Rules</h3>
+      <div class="info-bar" style="display:block; font-family: 'JetBrains Mono', monospace; line-height: 1.6;">
+        <div style="color: var(--accent); margin-bottom: 6px; font-weight: 600;">Bezier Curves (From looknfeel.conf):</div>
+        <div style="color: var(--fg2); margin-left: 10px;">
+          • easeOutQuint: 0.23, 1, 0.32, 1<br>
+          • easeInOutCubic: 0.65, 0.05, 0.36, 1<br>
+          • almostLinear: 0.5, 0.5, 0.75, 1.0<br>
+          • quick: 0.15, 0, 0.1, 1
+        </div>
+        
+        <div style="color: var(--accent); margin-top: 12px; margin-bottom: 6px; font-weight: 600;">Animation Rules:</div>
+        <div style="color: var(--fg2); margin-left: 10px;">
+          • border: 1, 5.39, easeOutQuint<br>
+          • windows: 1, 3.79, easeOutQuint<br>
+          • windowsIn: 1, 4.1, easeOutQuint, popin 87%<br>
+          • windowsOut: 1, 1.49, linear, popin 87%<br>
+          • fadeIn / fadeOut: 1, 1.73, almostLinear<br>
+          • workspaces: 0, 0, ease
+        </div>
+      </div>
+    </div>
+  `;
+  el.insertAdjacentHTML('beforeend', extraHTML);
+}
+
+async function renderGeneral(el) {
+  await renderSection(el, 'General', '⊞', 'Window borders, gaps, layout', [
+    makeSlider('general:border_size', 'Border Size', 0, 20, 1, 'Size of window borders'),
+    makeSlider('general:gaps_in', 'Gaps In', 0, 50, 1, 'Gaps between windows'),
+    makeSlider('general:gaps_out', 'Gaps Out', 0, 100, 1, 'Gaps to monitor edges'),
+    makeSlider('general:float_gaps', 'Float Gaps', -1, 50, 1, 'Gaps for floating windows (-1=default)'),
+    makeSlider('general:gaps_workspaces', 'Workspace Gaps', 0, 50, 1, 'Gaps between workspaces'),
+    makeSelect('general:layout', 'Layout', ['dwindle', 'master', 'scrolling', 'monocle'], 'Active layout'),
+    makeToggle('general:resize_on_border', 'Resize on Border', 'Drag border to resize'),
+    makeSlider('general:extend_border_grab_area', 'Extend Grab Area', 0, 50, 1, 'Extra grab area around borders'),
+    makeToggle('general:hover_icon_on_border', 'Hover Icon', 'Show cursor on border hover'),
+    makeToggle('general:allow_tearing', 'Allow Tearing', 'Master switch for tearing'),
+    makeToggle('general:no_focus_fallback', 'No Focus Fallback', 'Don\'t fallback to next window'),
+    makeSlider('general:resize_corner', 'Resize Corner', 0, 4, 1, 'Force corner for float resize (0=off)'),
+    makeToggle('general:modal_parent_blocking', 'Modal Parent Block', 'Block parent of modals'),
+    makeText('general:locale', 'Locale', 'Override system locale (e.g. en_US)'),
+    makeText('general:col.active_border', 'Active Border Color', 'Gradient or color'),
+    makeText('general:col.inactive_border', 'Inactive Border Color', 'Gradient or color'),
+  ]);
+}
+
+async function renderDecoration(el) {
+  await renderSection(el, 'Decoration', '◐', 'Rounding, opacity, blur, shadow, dim', [
+    makeSlider('decoration:rounding', 'Rounding', 0, 50, 1, 'Window corner rounding'),
+    makeSlider('decoration:rounding_power', 'Rounding Power', 1, 10, 0.5, 'Rounding curve power'),
+    makeSlider('decoration:active_opacity', 'Active Opacity', 0, 1, 0.01, 'Active window opacity'),
+    makeSlider('decoration:inactive_opacity', 'Inactive Opacity', 0, 1, 0.01, 'Inactive window opacity'),
+    makeSlider('decoration:fullscreen_opacity', 'Fullscreen Opacity', 0, 1, 0.01, 'Fullscreen window opacity'),
+    makeToggle('decoration:dim_inactive', 'Dim Inactive', 'Dim inactive windows'),
+    makeSlider('decoration:dim_strength', 'Dim Strength', 0, 1, 0.01, 'How much to dim'),
+    makeSlider('decoration:dim_around', 'Dim Around', 0, 1, 0.01, 'Dim the area around'),
+    makeSlider('decoration:dim_special', 'Dim Special', 0, 1, 0.01, 'Dim special workspace'),
+    makeToggle('decoration:shadow:enabled', 'Shadow', 'Enable window shadows'),
+    makeSlider('decoration:shadow:range', 'Shadow Range', 0, 100, 1, 'Shadow spread'),
+    makeSlider('decoration:shadow:render_power', 'Shadow Power', 1, 10, 1, 'Shadow darkness'),
+    makeText('decoration:shadow:color', 'Shadow Color', 'Shadow color'),
+    makeToggle('decoration:shadow:ignore_window', 'Shadow Ignore Window', 'Shadow ignores window'),
+    makeToggle('decoration:blur:enabled', 'Blur', 'Enable blur effect'),
+    makeSlider('decoration:blur:size', 'Blur Size', 0, 20, 1, 'Blur kernel size'),
+    makeSlider('decoration:blur:passes', 'Blur Passes', 0, 10, 1, 'Number of blur passes'),
+    makeToggle('decoration:blur:special', 'Blur Special', 'Blur special workspaces'),
+    makeToggle('decoration:blur:popups', 'Blur Popups', 'Blur popup windows'),
+    makeSlider('decoration:blur:popups_ignorealpha', 'Popups Ignore Alpha', 0, 1, 0.01, 'Alpha threshold'),
+    makeToggle('decoration:blur:new_optimizations', 'New Optimizations', 'Optimized blur'),
+    makeToggle('decoration:blur:xray', 'X-Ray', 'See through blurred windows'),
+    makeSlider('decoration:blur:noise', 'Blur Noise', 0, 1, 0.001, 'Noise amount'),
+    makeSlider('decoration:blur:contrast', 'Blur Contrast', 0, 2, 0.01, 'Contrast boost'),
+    makeSlider('decoration:blur:brightness', 'Blur Brightness', 0, 2, 0.01, 'Brightness boost'),
+    makeSlider('decoration:blur:vibrancy', 'Vibrancy', 0, 2, 0.01, 'Vibrancy boost'),
+    makeSlider('decoration:blur:vibrancy_darkness', 'Vibrancy Darkness', 0, 2, 0.01, 'Vibrancy darkness'),
+  ]);
+}
+
+async function renderGroup(el) {
+  await renderSection(el, 'Group', '⊞', 'Tabbed windows, group colors', [
+    makeToggle('group:insert_after_current', 'Insert After Current', 'New window after current in group'),
+    makeToggle('group:focus_removed_window', 'Focus Removed', 'Focus window when removed from group'),
+    makeToggle('group:merge_groups_on_drag', 'Merge on Drag', 'Merge groups when dragging'),
+    makeToggle('group:merge_groups_on_groupbar', 'Merge on Groupbar', 'Merge on groupbar drag'),
+    makeToggle('group:auto_group', 'Auto Group', 'Auto group new windows'),
+    makeToggle('group:drag_into_group', 'Drag Into Group', 'Allow drag into group'),
+    makeToggle('group:groupbar:enabled', 'Groupbar', 'Show group tab bar'),
+    makeSlider('group:groupbar:font_size', 'Font Size', 1, 30, 1, 'Groupbar font size'),
+    makeSlider('group:groupbar:height', 'Height', 10, 50, 1, 'Groupbar height'),
+    makeSlider('group:groupbar:gaps_in', 'Gaps In', 0, 20, 1, 'Inner gaps'),
+    makeSlider('group:groupbar:gaps_out', 'Gaps Out', 0, 20, 1, 'Outer gaps'),
+    makeSlider('group:groupbar:indicator_height', 'Indicator Height', 0, 10, 1, 'Active indicator'),
+    makeSlider('group:groupbar:indicator_gap', 'Indicator Gap', 0, 10, 1, 'Gap to indicator'),
+    makeToggle('group:groupbar:gradients', 'Gradients', 'Use gradients'),
+    makeSlider('group:groupbar:gradient_rounding', 'Gradient Rounding', 0, 20, 1, 'Gradient corners'),
+    makeToggle('group:groupbar:render_titles', 'Render Titles', 'Show window titles'),
+    makeToggle('group:groupbar:scrolling', 'Scrolling', 'Scrollable groupbar'),
+  ]);
+}
+
+async function renderDwindle(el) {
+  await renderSection(el, 'Dwindle', '◫', 'Dwindle layout settings', [
+    makeToggle('dwindle:preserve_split', 'Preserve Split', 'Preserve split direction'),
+    makeToggle('dwindle:smart_split', 'Smart Split', 'Split based on window ratio'),
+    makeToggle('dwindle:smart_resizing', 'Smart Resizing', 'Resize considering neighbors'),
+    makeSelect('dwindle:force_split', 'Force Split', ['0', '1', '2'], '0=auto, 1=left, 2=right'),
+    makeSlider('dwindle:split_width_multiplier', 'Split Width Multiplier', 0.5, 2, 0.01, 'Width multiplier'),
+    makeSlider('dwindle:split_bias', 'Split Bias', 0, 1, 0.01, 'Split ratio bias'),
+    makeToggle('dwindle:use_active_for_splits', 'Use Active for Splits', 'Use active window for split'),
+    makeSlider('dwindle:default_split_ratio', 'Default Split Ratio', 0.5, 2, 0.01, 'Default split ratio'),
+    makeSlider('dwindle:special_scale_factor', 'Special Scale', 0.5, 1, 0.01, 'Special workspace scale'),
+  ]);
+}
+
+async function renderMaster(el) {
+  await renderSection(el, 'Master', '▣', 'Master layout settings', [
+    makeSelect('master:new_status', 'New Status', ['master', 'slave', 'inherit'], 'Where new windows go'),
+    makeSelect('master:orientation', 'Orientation', ['left', 'right', 'top', 'bottom', 'center'], 'Master position'),
+    makeToggle('master:smart_resizing', 'Smart Resizing', 'Resize considering neighbors'),
+    makeToggle('master:drop_at_cursor', 'Drop at Cursor', 'Place new window at cursor'),
+    makeToggle('master:allow_small_split', 'Allow Small Split', 'Allow very small splits'),
+    makeToggle('master:new_on_active', 'New on Active', 'New window next to active'),
+    makeToggle('master:new_on_top', 'New on Top', 'New window on top'),
+  ]);
+}
+
+async function renderScrolling(el) {
+  await renderSection(el, 'Scrolling', '⇄', 'Scrolling layout settings', [
+    makeSlider('scrolling:column_width', 'Column Width', 0.1, 1, 0.01, 'Column width ratio'),
+    makeToggle('scrolling:follow_focus', 'Follow Focus', 'Scroll to follow focus'),
+  ]);
+}
+
+async function renderInput(el) {
+  el.innerHTML = makeHeader('Keyboard', '⌨', 'Layout, variant, options, repeat rate') + `
+    <div class="info-bar">
+      <span class="icon">ℹ</span>
+      Current: <strong id="kb-current">loading...</strong>
+    </div>
+    <div class="settings-grid" id="grid"></div>
+  `;
+  // Show current keyboard config
+  const layout = await getOpt('input:kb_layout');
+  const variant = await getOpt('input:kb_variant');
+  const model = await getOpt('input:kb_model');
+  document.getElementById('kb-current').textContent = 
+    `${layout.value || '?'}${variant.value ? '('+variant.value+')' : ''} ${model.value || ''}`;
+  
+  const grid = document.getElementById('grid');
+  const items = await Promise.all([
+    makeText('input:kb_layout', 'Layout', 'Keyboard layout (e.g. br, us, de, fr)'),
+    makeText('input:kb_variant', 'Variant', 'Layout variant (e.g. thinkpad, abnt2, dvorak)'),
+    makeText('input:kb_model', 'Model', 'Keyboard model (e.g. thinkpad, abnt2)'),
+    makeText('input:kb_options', 'Options', 'XKB options (e.g. compose:caps, grp:alt_caps_toggle)'),
+    makeText('input:kb_rules', 'Rules', 'XKB rules'),
+    makeText('input:kb_file', 'KB File', 'Custom XKB file path'),
+    makeToggle('input:numlock_by_default', 'Numlock by Default', 'Enable numlock on start'),
+    makeToggle('input:resolve_binds_by_sym', 'Resolve Binds by Sym', 'Resolve by symbol not keycode'),
+    makeSlider('input:repeat_rate', 'Repeat Rate', 0, 100, 1, 'Key repeat rate (Hz)'),
+    makeSlider('input:repeat_delay', 'Repeat Delay', 0, 1000, 50, 'Key repeat delay (ms)'),
+    makeSlider('input:sensitivity', 'Sensitivity', -1, 1, 0.05, 'Mouse sensitivity'),
+    makeSelect('input:accel_profile', 'Accel Profile', ['', 'adaptive', 'flat'], 'Acceleration profile'),
+    makeToggle('input:force_no_accel', 'Force No Accel', 'Disable acceleration'),
+    makeToggle('input:left_handed', 'Left Handed', 'Swap mouse buttons'),
+    makeSelect('input:scroll_method', 'Scroll Method', ['', '2fg', 'edge', 'on_button_down'], 'Scroll method'),
+    makeToggle('input:natural_scroll', 'Natural Scroll', 'Reverse scroll direction'),
+    makeSlider('input:follow_mouse', 'Follow Mouse', 0, 3, 1, 'Focus follows mouse (0-3)'),
+    makeToggle('input:focus_on_close', 'Focus on Close', 'Focus next on close'),
+    makeToggle('input:mouse_refocus', 'Mouse Refocus', 'Refocus on mouse move'),
+    makeToggle('input:special_fallthrough', 'Special Fallthrough', 'Click through special workspace'),
+  ]);
+  grid.innerHTML = items.join('');
+  
+  // Add keyboard presets after grid
+  const presetsHTML = `
+    <div style="margin-top:20px">
+      <h3 style="font-size:14px;margin-bottom:12px;color:var(--fg)">Quick Keyboard Presets</h3>
+      <div class="presets-grid">
+        <div class="preset-card" onclick="applyKbPreset('br-thinkpad')">
+          <div class="icon">🇧🇷</div>
+          <div class="name">BR ThinkPad</div>
+          <div class="desc">br + thinkpad variant</div>
+        </div>
+        <div class="preset-card" onclick="applyKbPreset('us-dvorak')">
+          <div class="icon">🇺🇸</div>
+          <div class="name">US Dvorak</div>
+          <div class="desc">us + dvorak variant</div>
+        </div>
+        <div class="preset-card" onclick="applyKbPreset('us-colemak')">
+          <div class="icon">🇺🇸</div>
+          <div class="name">US Colemak</div>
+          <div class="desc">us + colemak variant</div>
+        </div>
+        <div class="preset-card" onclick="applyKbPreset('de')">
+          <div class="icon">🇩🇪</div>
+          <div class="name">German</div>
+          <div class="desc">de layout</div>
+        </div>
+      </div>
+    </div>
+  `;
+  el.insertAdjacentHTML('beforeend', presetsHTML);
+}
+
+async function renderTouchpad(el) {
+  await renderSection(el, 'Touchpad', '⊡', 'Trackpad gestures, tap, scroll, click', [
+    makeToggle('input:touchpad:disable_while_typing', 'Disable While Typing', 'Disable trackpad while typing'),
+    makeToggle('input:touchpad:natural_scroll', 'Natural Scroll', 'Inverse scroll direction (macOS-like)'),
+    makeSlider('input:touchpad:scroll_factor', 'Scroll Factor', 0.1, 5, 0.1, 'Scroll speed multiplier'),
+    makeToggle('input:touchpad:clickfinger_behavior', 'Clickfinger', 'Two-finger click = right-click'),
+    makeToggle('input:touchpad:tap-to-click', 'Tap to Click', 'Tap trackpad to click'),
+    makeToggle('input:touchpad:tap-and-drag', 'Tap and Drag', 'Tap then drag to select'),
+    makeToggle('input:touchpad:drag_lock', 'Drag Lock', 'Keep drag active when lifting finger'),
+    makeToggle('input:touchpad:flip_x', 'Flip X', 'Invert horizontal scroll/pointer'),
+    makeToggle('input:touchpad:flip_y', 'Flip Y', 'Invert vertical scroll/pointer'),
+    makeToggle('input:touchpad:middle_button_emulation', 'Middle Button Emulation'),
+    makeSelect('input:touchpad:tap_button_map', 'Tap Button Map', ['', 'lrm', 'lmr'], 'Left-Right-Middle mapping'),
+  ]);
+}
+
+async function renderTablet(el) {
+  await renderSection(el, 'Tablet', '✎', 'Graphics tablet settings', [
+    makeSlider('input:tablet:transform', 'Transform', 0, 7, 1, 'Transform (0-7)'),
+    makeText('input:tablet:output', 'Output', 'Bound output'),
+    makeToggle('input:tablet:left_handed', 'Left Handed'),
+  ]);
+}
+
+async function renderCursor(el) {
+  await renderSection(el, 'Cursor', '⊕', 'Cursor behavior and zoom', [
+    makeToggle('cursor:hide_on_key_press', 'Hide on Key Press'),
+    makeToggle('cursor:hide_on_touch', 'Hide on Touch'),
+    makeToggle('cursor:no_warps', 'No Warps', 'Don\'t warp cursor'),
+    makeToggle('cursor:no_break_fs_vrr', 'No Break FS VRR', 'Don\'t break fullscreen VRR'),
+    makeToggle('cursor:use_cpu_buffer', 'CPU Buffer', 'Use CPU cursor buffer'),
+    makeToggle('cursor:enable_hyprcursor', 'Hyprcursor', 'Enable hyprcursor'),
+    makeToggle('cursor:sync_gsettings_theme', 'Sync GSettings', 'Sync with GTK theme'),
+    makeSlider('cursor:hotspot_padding', 'Hotspot Padding', 0, 20, 1, 'Cursor hotspot padding'),
+    makeSlider('cursor:inactive_timeout', 'Inactive Timeout', 0, 30, 1, 'Hide after seconds (0=off)'),
+  ]);
+}
+
+async function renderMisc(el) {
+  await renderSection(el, 'Misc', '⚙', 'DPMS, swallow, notifications, misc', [
+    makeToggle('misc:disable_hyprland_logo', 'Disable Logo'),
+    makeToggle('misc:disable_splash_rendering', 'Disable Splash'),
+    makeToggle('misc:force_default_wallpaper', 'Force Default Wallpaper'),
+    makeToggle('misc:vfr', 'VFR', 'Variable Frame Rate'),
+    makeSlider('misc:vrr', 'VRR', 0, 2, 1, '0=off, 1=on, 2=fullscreen only'),
+    makeToggle('misc:mouse_move_enables_dpms', 'Mouse enables DPMS'),
+    makeToggle('misc:key_press_enables_dpms', 'Key enables DPMS'),
+    makeToggle('misc:always_follow_on_dnd', 'Follow on DnD'),
+    makeToggle('misc:layers_hog_keyboard_focus', 'Layers Hog Focus'),
+    makeToggle('misc:animate_manual_resizes', 'Animate Manual Resizes'),
+    makeToggle('misc:disable_autoreload', 'Disable Autoreload'),
+    makeToggle('misc:enable_swallow', 'Enable Swallow'),
+    makeText('misc:swallow_regex', 'Swallow Regex', 'Regex for swallowing'),
+    makeToggle('misc:focus_on_activate', 'Focus on Activate'),
+    makeToggle('misc:middle_click_paste', 'Middle Click Paste'),
+    makeSlider('misc:render_unfocused_fps', 'Unfocused FPS', 0, 120, 1, 'FPS for unfocused windows'),
+    makeSlider('misc:lockdead_screen_delay', 'Lockdead Delay', 0, 10000, 100, 'Lockscreen delay (ms)'),
+    makeToggle('misc:enable_anr_dialog', 'ANR Dialog', 'App Not Responding dialog'),
+    makeSlider('misc:anr_missed_pings', 'ANR Missed Pings', 1, 10, 1, 'Pings before ANR'),
+    makeSlider('misc:on_focus_under_fullscreen', 'Focus Under Fullscreen', 0, 2, 1, '0=do nothing, 1=unfullscreen, 2=change'),
+    makeToggle('misc:allow_session_lock_restore', 'Session Lock Restore'),
+    makeText('misc:background_color', 'Background Color', 'Wallpaper-less background color'),
+  ]);
+}
+
+async function renderBinds(el) {
+  await renderSection(el, 'Binds', '⌘', 'Keybind behavior', [
+    makeToggle('binds:pass_mouse_when_bound', 'Pass Mouse When Bound'),
+    makeSlider('binds:scroll_event_delay', 'Scroll Event Delay', 0, 1000, 50, 'ms between scroll events'),
+    makeToggle('binds:workspace_back_and_forth', 'Workspace Back and Forth'),
+    makeToggle('binds:hide_special_on_workspace_change', 'Hide Special on Switch'),
+    makeToggle('binds:allow_workspace_cycles', 'Allow Workspace Cycles'),
+    makeSelect('binds:workspace_center_on', 'Workspace Center On', ['0', '1', '2'], '0=monitor, 1=cursor, 2=window'),
+    makeSelect('binds:focus_preferred_method', 'Focus Preferred', ['0', '1'], '0=history, 1=direction'),
+    makeToggle('binds:ignore_group_lock', 'Ignore Group Lock'),
+    makeToggle('binds:disable_keybind_grabbing', 'Disable Keybind Grabbing'),
+    makeSlider('binds:drag_threshold', 'Drag Threshold', 0, 100, 1, 'px before drag triggers'),
+  ]);
+}
+
+async function renderXWayland(el) {
+  await renderSection(el, 'XWayland', '⊞', 'XWayland compatibility', [
+    makeToggle('xwayland:enabled', 'Enabled', 'Enable XWayland'),
+    makeToggle('xwayland:use_nearest_neighbor', 'Nearest Neighbor', 'Use nearest neighbor scaling'),
+    makeToggle('xwayland:force_zero_scaling', 'Force Zero Scaling', 'Disable XWayland scaling'),
+  ]);
+}
+
+async function renderEcosystem(el) {
+  await renderSection(el, 'Ecosystem', '🌐', 'Hyprland ecosystem settings', [
+    makeToggle('ecosystem:no_update_news', 'No Update News'),
+    makeToggle('ecosystem:no_donation_nag', 'No Donation Nag'),
+    makeToggle('ecosystem:enforce_permissions', 'Enforce Permissions'),
+  ]);
+}
+
+function renderPresets(el) {
+  el.innerHTML = `
+    ${makeHeader('Presets', '★', 'Quick visual presets')}
+    <div class="info-bar">
+      <span class="icon">ℹ</span>
+      Presets apply multiple settings at once. Individual settings can be fine-tuned in their sections.
+    </div>
+    <div class="presets-grid">
+      <div class="preset-card" onclick="applyPreset('performance')">
+        <div class="icon">⚡</div>
+        <div class="name">Performance</div>
+        <div class="desc">No effects, max FPS</div>
+      </div>
+      <div class="preset-card" onclick="applyPreset('minimal')">
+        <div class="icon">◻</div>
+        <div class="name">Minimal</div>
+        <div class="desc">Clean, no blur/shadow</div>
+      </div>
+      <div class="preset-card" onclick="applyPreset('balanced')">
+        <div class="icon">◑</div>
+        <div class="name">Balanced</div>
+        <div class="desc">Light effects, good perf</div>
+      </div>
+      <div class="preset-card" onclick="applyPreset('full')">
+        <div class="icon">◉</div>
+        <div class="name">Full Effects</div>
+        <div class="desc">All effects, beautiful</div>
+      </div>
+    </div>
+    <div class="settings-grid" id="grid"></div>
+  `;
+}
+
+async function applyPreset(name) {
+  switch(name) {
+    case 'performance':
+      await setOpt('decoration:blur:enabled', false);
+      await setOpt('decoration:shadow:enabled', false);
+      await setOpt('decoration:dim_inactive', false);
+      await setOpt('animations:enabled', false);
+      await setOpt('decoration:rounding', 0);
+      await setOpt('decoration:active_opacity', 1.0);
+      await setOpt('decoration:inactive_opacity', 1.0);
+      break;
+    case 'minimal':
+      await setOpt('decoration:blur:enabled', false);
+      await setOpt('decoration:shadow:enabled', false);
+      await setOpt('decoration:dim_inactive', false);
+      await setOpt('animations:enabled', true);
+      await setOpt('decoration:rounding', 0);
+      break;
+    case 'balanced':
+      await setOpt('decoration:blur:enabled', true);
+      await setOpt('decoration:blur:passes', 1);
+      await setOpt('decoration:blur:size', 2);
+      await setOpt('decoration:shadow:enabled', true);
+      await setOpt('decoration:shadow:range', 4);
+      await setOpt('decoration:dim_inactive', false);
+      await setOpt('animations:enabled', true);
+      await setOpt('decoration:rounding', 4);
+      break;
+    case 'full':
+      await setOpt('decoration:blur:enabled', true);
+      await setOpt('decoration:blur:passes', 3);
+      await setOpt('decoration:blur:size', 8);
+      await setOpt('decoration:shadow:enabled', true);
+      await setOpt('decoration:shadow:range', 15);
+      await setOpt('decoration:dim_inactive', true);
+      await setOpt('decoration:dim_strength', 0.1);
+      await setOpt('animations:enabled', true);
+      await setOpt('decoration:rounding', 8);
+      await setOpt('decoration:active_opacity', 1.0);
+      await setOpt('decoration:inactive_opacity', 0.92);
+      break;
+  }
+  showToast(`Preset "${name}" applied`);
+}
+
+async function applyKbPreset(name) {
+  switch(name) {
+    case 'br-thinkpad':
+      await setOpt('input:kb_layout', 'br');
+      await setOpt('input:kb_variant', 'thinkpad');
+      await setOpt('input:kb_model', 'thinkpad');
+      await setOpt('input:kb_options', 'compose:caps');
+      break;
+    case 'us-dvorak':
+      await setOpt('input:kb_layout', 'us');
+      await setOpt('input:kb_variant', 'dvorak');
+      await setOpt('input:kb_model', '');
+      await setOpt('input:kb_options', '');
+      break;
+    case 'us-colemak':
+      await setOpt('input:kb_layout', 'us');
+      await setOpt('input:kb_variant', 'colemak');
+      await setOpt('input:kb_model', '');
+      await setOpt('input:kb_options', '');
+      break;
+    case 'de':
+      await setOpt('input:kb_layout', 'de');
+      await setOpt('input:kb_variant', '');
+      await setOpt('input:kb_model', '');
+      await setOpt('input:kb_options', '');
+      break;
+  }
+  showToast(`Keyboard preset "${name}" applied`);
+  renderInput(document.getElementById('main-content'));
+}
+
+async function renderGestures(el) {
+  el.innerHTML = makeHeader('Gestures', '🤏', 'Workspace swipe gestures (3/4-finger swipe)') + `
+    <div class="info-bar">
+      <span class="icon">ℹ</span>
+      3-finger or 4-finger swipe to switch workspaces. Configure sensitivity, direction, and behavior below.
+    </div>
+    <div class="settings-grid" id="grid"></div>
+  `;
+  const grid = document.getElementById('grid');
+  const items = await Promise.all([
+    makeToggle('gestures:workspace_swipe_create_new', 'Create New Workspace', 'Allow swiping to create new workspace'),
+    makeToggle('gestures:workspace_swipe_invert', 'Invert Direction', 'Invert swipe direction'),
+    makeToggle('gestures:workspace_swipe_direction_lock', 'Direction Lock', 'Lock to horizontal/vertical after initial movement'),
+    makeSlider('gestures:workspace_swipe_direction_lock_threshold', 'Direction Lock Threshold', 1, 100, 1, 'px before direction locks'),
+    makeSlider('gestures:workspace_swipe_distance', 'Swipe Distance', 50, 1000, 10, 'px required to trigger workspace switch'),
+    makeSlider('gestures:workspace_swipe_min_speed_to_force', 'Min Speed to Force', 1, 200, 1, 'Speed (px/s) to force switch even if distance not met'),
+    makeSlider('gestures:workspace_swipe_cancel_ratio', 'Cancel Ratio', 0, 1, 0.05, 'Swipe ratio to cancel (0=never cancel, 1=always cancel)'),
+    makeToggle('gestures:workspace_swipe_forever', 'Forever Swipe', 'Allow swiping past first/last workspace'),
+    makeToggle('gestures:workspace_swipe_use_r', 'Use R', 'Use r instead of m for workspace switching'),
+    makeToggle('gestures:workspace_swipe_touch', 'Touch Screen', 'Enable swipe gestures for touch screens'),
+  ]);
+  grid.innerHTML = items.join('');
+}
+
+async function renderLocale(el) {
+  const res = await fetch('/api/system', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'get_locale'})
+  });
+  const data = await res.json();
+  
+  el.innerHTML = `
+    ${makeHeader('Locale & Language', '🌐', 'System language, keyboard locale, Hyprland locale')}
+    <div class="info-bar">
+      <span class="icon">ℹ</span>
+      Changes to system locale require re-login. Hyprland locale applies immediately.
+    </div>
+    
+    <div style="margin-bottom:20px">
+      <h3 style="font-size:14px;margin-bottom:12px;color:var(--fg)">System Locale</h3>
+      <div class="settings-grid">
+        <div class="setting-card">
+          <div class="header">
+            <div class="label">Current System LANG</div>
+          </div>
+          <div class="value-row">
+            <span class="current-value" style="font-size:16px">${data.system_lang || 'unknown'}</span>
+          </div>
+        </div>
+        <div class="setting-card">
+          <div class="header">
+            <div class="label">Console Keymap</div>
+          </div>
+          <div class="value-row">
+            <span class="current-value">${data.vc_keymap || 'unknown'}</span>
+          </div>
+        </div>
+        <div class="setting-card">
+          <div class="header">
+            <div class="label">X11 Layout</div>
+          </div>
+          <div class="value-row">
+            <span class="current-value">${data.x11_layout || 'unknown'}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-bottom:20px">
+      <h3 style="font-size:14px;margin-bottom:12px;color:var(--fg)">Change System Locale</h3>
+      <div class="settings-grid">
+        <div class="setting-card">
+          <div class="header">
+            <div class="label">LANG</div>
+          </div>
+          <div class="value-row">
+            <select id="locale-select" style="flex:1">
+              <option value="pt_BR.UTF-8" ${data.system_lang === 'pt_BR.UTF-8' ? 'selected' : ''}>pt_BR.UTF-8 (Português Brasil)</option>
+              <option value="en_US.UTF-8" ${data.system_lang === 'en_US.UTF-8' ? 'selected' : ''}>en_US.UTF-8 (English US)</option>
+              <option value="en_GB.UTF-8" ${data.system_lang === 'en_GB.UTF-8' ? 'selected' : ''}>en_GB.UTF-8 (English UK)</option>
+              <option value="de_DE.UTF-8" ${data.system_lang === 'de_DE.UTF-8' ? 'selected' : ''}>de_DE.UTF-8 (Deutsch)</option>
+              <option value="es_ES.UTF-8" ${data.system_lang === 'es_ES.UTF-8' ? 'selected' : ''}>es_ES.UTF-8 (Español)</option>
+              <option value="fr_FR.UTF-8" ${data.system_lang === 'fr_FR.UTF-8' ? 'selected' : ''}>fr_FR.UTF-8 (Français)</option>
+              <option value="ja_JP.UTF-8" ${data.system_lang === 'ja_JP.UTF-8' ? 'selected' : ''}>ja_JP.UTF-8 (日本語)</option>
+              <option value="zh_CN.UTF-8" ${data.system_lang === 'zh_CN.UTF-8' ? 'selected' : ''}>zh_CN.UTF-8 (中文)</option>
+            </select>
+            <button class="btn btn-accent" onclick="setSystemLocale()">Apply</button>
+          </div>
+          <div style="font-size:10px;color:var(--fg3);margin-top:6px">Sets LANG via localectl (requires re-login)</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-bottom:20px">
+      <h3 style="font-size:14px;margin-bottom:12px;color:var(--fg)">Hyprland Locale Override</h3>
+      <div class="settings-grid" id="grid-locale"></div>
+    </div>
+  `;
+  
+  const grid = document.getElementById('grid-locale');
+  const items = await Promise.all([
+    makeText('general:locale', 'Locale Override', 'Override locale for Hyprland only (empty = system default)'),
+  ]);
+  grid.innerHTML = items.join('');
+}
+
+async function setSystemLocale() {
+  const locale = document.getElementById('locale-select').value;
+  const res = await fetch('/api/system', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'set_locale', locale: locale})
+  });
+  const data = await res.json();
+  if (data.ok) {
+    showToast(`System locale set to ${locale} (re-login to take effect)`);
+  } else {
+    showToast(`Error: ${data.error}`);
+  }
+}
+
+// Load general on start
+showSection('general');
+</script>
+</body>
+</html>
+"""
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+    
+    def do_GET(self):
+        if self.path == '/' or self.path == '/index.html':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            self.end_headers()
+            
+            theme_styles = get_theme_styles()
+            if theme_styles:
+                resp = HTML.replace("/* THEME_VARIABLES */", theme_styles)
+            else:
+                default_root = """
+:root {
+  --bg: #111111;
+  --bg2: #1a1a1a;
+  --bg3: #222222;
+  --bg4: #2a2a2a;
+  --fg: #e0e0e0;
+  --fg2: #888888;
+  --fg3: #555555;
+  --accent: #F5B700;
+  --accent2: #7A5C00;
+  --accent3: #3d2e00;
+  --border: #2a2a2a;
+  --border2: #333333;
+  --hover: #2a2a2a;
+  --active: #333333;
+  --success: #4ade80;
+  --danger: #f87171;
+  --radius: 6px;
+  --radius2: 10px;
+  --shadow: 0 2px 8px rgba(0,0,0,0.3);
+  --transition: 0.15s ease;
+}
+"""
+                resp = HTML.replace("/* THEME_VARIABLES */", default_root)
+            self.wfile.write(resp.encode())
+        else:
+            self.send_error(404)
+    
+    def do_POST(self):
+        if self.path == '/api':
+            length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(length))
+            
+            action = body.get('action')
+            opt = body.get('opt')
+            value = body.get('value')
+            
+            if action == 'get':
+                result = get_option(opt)
+            elif action == 'set':
+                set_option(opt, value)
+                result = {"ok": True}
+            else:
+                result = {"error": "unknown action"}
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode())
+        elif self.path == '/api/system':
+            length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(length))
+            action = body.get('action')
+            
+            if action == 'get_locale':
+                try:
+                    loc = subprocess.run(['localectl', 'status'], capture_output=True, text=True, timeout=5)
+                    lines = loc.stdout.strip().split('\n')
+                    result = {}
+                    for line in lines:
+                        if 'LANG=' in line:
+                            result['system_lang'] = line.split('LANG=')[1].strip()
+                        if 'VC Keymap:' in line:
+                            result['vc_keymap'] = line.split('VC Keymap:')[1].strip()
+                        if 'X11 Layout:' in line:
+                            result['x11_layout'] = line.split('X11 Layout:')[1].strip()
+                    if not result.get('system_lang'):
+                        result['system_lang'] = os.environ.get('LANG', 'unknown')
+                except:
+                    result = {'system_lang': os.environ.get('LANG', 'unknown'), 'vc_keymap': '?', 'x11_layout': '?'}
+            elif action == 'set_locale':
+                locale = body.get('locale', '')
+                try:
+                    subprocess.run(['localectl', 'set-locale', f'LANG={locale}'], capture_output=True, text=True, timeout=10)
+                    result = {"ok": True}
+                except Exception as e:
+                    result = {"ok": False, "error": str(e)}
+            else:
+                result = {"error": "unknown system action"}
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode())
+        else:
+            self.send_error(404)
+
+def is_port_in_use(port):
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('127.0.0.1', port)) == 0
+
+def open_panel():
+    import shutil
+    url = f"http://127.0.0.1:{PORT}"
+    try:
+        if shutil.which("omarchy-launch-webapp"):
+            subprocess.Popen(["omarchy-launch-webapp", url])
+            return
+        for browser in ["chromium", "google-chrome", "brave-browser", "vivaldi-stable", "chrome"]:
+            if shutil.which(browser):
+                subprocess.Popen([browser, f"--app={url}"])
+                return
+    except Exception as e:
+        print(f"Error launching web app: {e}")
+    webbrowser.open(url)
+
+def main():
+    # If already running (e.g. systemd service), just open browser
+    if is_port_in_use(PORT):
+        open_panel()
+        return
+    
+    server = http.server.HTTPServer(('127.0.0.1', PORT), Handler)
+    print(f"Hyprland Settings Panel: http://127.0.0.1:{PORT}")
+    
+    # Handle SIGTERM for clean systemd shutdowns
+    def handle_sigterm(signum, frame):
+        print("Received SIGTERM, shutting down...")
+        server.shutdown()
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, handle_sigterm)
+    
+    threading.Timer(0.5, open_panel).start()
+    
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nClosing...")
+        server.shutdown()
+
+if __name__ == '__main__':
+    main()

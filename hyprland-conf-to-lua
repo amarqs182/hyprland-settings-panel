@@ -141,12 +141,18 @@ class HyprlangToLua:
         if stripped.startswith("source"):
             match = re.match(r'source\s*=\s*(.+)', stripped)
             if match:
-                path = match.group(1).strip()
-                # Convert path for require()
-                req_path = path.replace("~/.config/hypr/", "").replace(".conf", "")
-                req_path = req_path.replace("/", ".").replace("\\", ".")
-                self.requires.append(path)
-                self.add(f'require("{req_path}")')
+                src_path = match.group(1).strip()
+                # Remove comments
+                if "#" in src_path:
+                    src_path = src_path.split("#")[0].strip()
+                self.requires.append(src_path)
+                # Keep as source = for external paths, convert to require for local
+                if "~/.config/hypr/" in src_path:
+                    req_path = src_path.replace("~/.config/hypr/", "").replace(".conf", "")
+                    self.add(f'require("{req_path}")')
+                else:
+                    # External path - keep as source
+                    self.add(f'-- source: {src_path}')
                 return
 
         # $variable = value
@@ -234,6 +240,44 @@ class HyprlangToLua:
                 self.add(f'hl.plugin("{plugin}", {{ {option} = {value} }})')
                 return
 
+        # bezier = "name, x1, y1, x2, y2" (standalone, parse before sections)
+        if stripped.startswith("bezier"):
+            match = re.match(r'bezier\s*=\s*(.+)', stripped)
+            if match:
+                args = match.group(1).strip().strip('"')
+                parts = [p.strip() for p in args.split(",")]
+                if len(parts) >= 5:
+                    name = parts[0]
+                    points = ", ".join(parts[1:])
+                    # If inside a section, close it first
+                    if self.indent > 0:
+                        self.indent = 0
+                        self.add("})  -- end hl.config")
+                        self.add_raw("")
+                    self.add(f'hl.curve("{name}", {{ type = "bezier", points = {{ {{ {points} }} }} }})')
+                    return
+
+        # animation = "name, on/off, speed, curve, style" (standalone, parse before sections)
+        if stripped.startswith("animation"):
+            match = re.match(r'animation\s*=\s*(.+)', stripped)
+            if match:
+                args = match.group(1).strip().strip('"')
+                parts = [p.strip() for p in args.split(",")]
+                if len(parts) >= 4:
+                    leaf = parts[0]
+                    enabled = parts[1] in ("1", "true", "yes")
+                    speed = parts[2]
+                    bezier = parts[3]
+                    style = parts[4] if len(parts) > 4 else None
+                    style_arg = f', style = "{style}"' if style else ""
+                    # If inside a section, close it first
+                    if self.indent > 0:
+                        self.indent = 0
+                        self.add("})  -- end hl.config")
+                        self.add_raw("")
+                    self.add(f'hl.animation({{ leaf = "{leaf}", enabled = {"true" if enabled else "false"}, speed = {speed}, bezier = "{bezier}"{style_arg} }})')
+                    return
+
         # Section opening: name {
         if "{" in stripped and not stripped.startswith("--"):
             match = re.match(r'(\S+)\s*\{', stripped)
@@ -279,14 +323,24 @@ class HyprlangToLua:
                     self.add(f'hl.animation({{ leaf = "{leaf}", enabled = {"true" if enabled else "false"}, speed = {speed}, bezier = "{bezier}"{style_arg} }})')
                     return
 
-        # Handle col.X as nested col = { X = ... } (merge multiple)
+        # env = KEY, VALUE
+        if stripped.startswith("env"):
+            match = re.match(r'env\s*=\s*(.+)', stripped)
+            if match:
+                args = match.group(1).strip()
+                parts = [p.strip() for p in args.split(",", 1)]
+                if len(parts) == 2:
+                    self.add(f'hl.env("{parts[0]}", "{parts[1]}")')
+                    return
+
+        # Regular key = value
         if "=" in stripped:
             match = re.match(r'(\S+)\s*=\s*(.+)', stripped)
             if match:
-                key = match.group(1)
+                key = self.convert_key(match.group(1))
                 value = self.convert_value(match.group(2))
-                
-                # Handle dotted keys like col.active_border
+                self.add(f"{key} = {value},")
+                return
                 if "." in key:
                     parts = key.split(".", 1)
                     parent = self.convert_key(parts[0])
